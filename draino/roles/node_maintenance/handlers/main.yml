@@ -1,0 +1,4 @@
+---
+- name: refresh-k8s-node-info
+  ansible.builtin.debug:
+    msg: "Handler: refresh-k8s-node-info (no-op by default)"

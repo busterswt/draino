@@ -1,0 +1,51 @@
+---
+# defaults for node_maintenance
+
+# Mode: "drain" or "restore"
+action: "drain"
+
+# List of targets. Each entry must contain k8s_node and nova_compute_host.
+# Example:
+# target_hosts:
+#   - k8s_node: compute-01
+#     nova_compute_host: compute-01
+target_hosts: []
+
+# Nova scheduler disable reason
+nova_disable_reason: "maintenance: drained by ansible"
+
+# kubernetes.core.k8s_drain options
+k8s_drain_delete_emptydir_data: true
+k8s_drain_force: true
+k8s_drain_ignore_daemonsets: true
+k8s_wait_sleep: 20
+k8s_wait_timeout: 1800
+
+# Nova migration wait settings
+nova_poll_delay: 20
+nova_poll_retries: 90
+
+# When true, delete the nova-compute service record after the host is empty
+nova_delete_service_when_empty: false
+
+# Taints to remove during restore (list of taint strings: key[=value]:Effect or key:Effect)
+taints_to_remove: []
+
+# Whether to run commands on local control node (this role expects to be run from control host)
+run_on_localhost: true
+
+# Command timeout (seconds) for command module calls when using openstack CLI
+openstack_cmd_timeout: 600
+
+# OpenStack cloud name from clouds.yaml / env
+openstack_cloud: null
+
+# When true, no destructive actions are performed; commands are logged instead.
+dry_run: true
+
+# Python executable to run the helper on the control host
+openstack_sdk_python: "python3"
+
+# Python requirements to install via pip for openstacksdk helper
+openstack_sdk_requirements:
+  - openstacksdk>=1.0.0

@@ -1,0 +1,118 @@
+---
+- name: "Restore maintenance: target={{ target.k8s_node }} / nova={{ target.nova_compute_host }}"
+  ansible.builtin.debug:
+    msg: "Restoring k8s node {{ target.k8s_node }} and enabling Nova host {{ target.nova_compute_host }}"
+
+- block:
+    - name: Check Kubernetes node exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        name: "{{ target.k8s_node }}"
+      register: k8s_node_info
+
+    - name: Fail if Kubernetes node not found
+      ansible.builtin.assert:
+        that:
+          - k8s_node_info.resources | length == 1
+        fail_msg: "Kubernetes node {{ target.k8s_node }} was not found."
+
+    - name: Fetch Nova compute service info
+      openstack.cloud.compute_service_info:
+        binary: nova-compute
+        host: "{{ target.nova_compute_host }}"
+        cloud: "{{ openstack_cloud | default(omit) }}"
+      register: nova_compute_services
+      failed_when: false
+
+    - name: Re-enable nova-compute service
+      block:
+        - name: Show enable command
+          ansible.builtin.debug:
+            msg: "DRY-RUN: openstack compute service set --enable {{ target.nova_compute_host }} nova-compute"
+          when: dry_run
+
+        - name: Enable nova compute
+          ansible.builtin.command:
+            argv:
+              - openstack
+              - compute
+              - service
+              - set
+              - --enable
+              - "{{ target.nova_compute_host }}"
+              - nova-compute
+          when: not dry_run
+          register: enable_compute
+          failed_when: enable_compute.rc != 0
+      delegate_to: localhost
+
+    - name: Remove taints from Kubernetes node
+      block:
+        - name: Show taint removal command
+          ansible.builtin.debug:
+            msg: "DRY-RUN: kubectl taint nodes {{ target.k8s_node }} {{ item }}-"
+          loop: "{{ taints_to_remove }}"
+          loop_control:
+            label: "{{ item }}"
+          when: dry_run
+
+        - name: Remove taints
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - taint
+              - nodes
+              - "{{ target.k8s_node }}"
+              - "{{ item }}-"
+          loop: "{{ taints_to_remove }}"
+          loop_control:
+            label: "{{ item }}"
+          when: not dry_run
+      when: taints_to_remove | length > 0
+      delegate_to: localhost
+
+    - name: Uncordon Kubernetes node
+      kubernetes.core.k8s_drain:
+        name: "{{ target.k8s_node }}"
+        state: uncordon
+
+    - name: Verify node is schedulable again
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        name: "{{ target.k8s_node }}"
+      register: k8s_node_post
+
+    - name: Assert Kubernetes node is schedulable
+      ansible.builtin.assert:
+        that:
+          - not (k8s_node_post.resources[0].spec.unschedulable | default(false) | bool)
+        fail_msg: "Kubernetes node {{ target.k8s_node }} is still unschedulable."
+
+    - name: Final Nova compute verify
+      openstack.cloud.compute_service_info:
+        binary: nova-compute
+        host: "{{ target.nova_compute_host }}"
+        cloud: "{{ openstack_cloud | default(omit) }}"
+      register: nova_compute_services_post
+      when: not dry_run
+
+    - name: Assert Nova compute service present and enabled
+      ansible.builtin.assert:
+        that:
+          - nova_compute_services_post.compute_services | length > 0
+          - not (nova_compute_services_post.compute_services[0].status | default('enabled') | lower == 'disabled')
+        fail_msg: "Nova compute service on {{ target.nova_compute_host }} appears disabled or missing."
+      when: not dry_run
+
+  rescue:
+    - name: Fail with restore context
+      ansible.builtin.fail:
+        msg: "Restore failed for host {{ target.nova_compute_host }}. See previous tasks."
+
+  always:
+    - name: Summary for restore target
+      ansible.builtin.debug:
+        msg:
+          - "Completed restore for {{ target.nova_compute_host }} (action=restore)"
