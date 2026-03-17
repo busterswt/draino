@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .models import Amphora, CommandResult, MaintenanceConfig, NovaServer, TargetNode
+from .models import Amphora, CommandResult, MaintenanceConfig, NovaServer, TargetNode, TargetSummary
 
 
 class DrainoError(RuntimeError):
@@ -81,12 +81,23 @@ class ClusterOperations:
         payload = json.loads(result.stdout or "{}")
         return sorted(item["metadata"]["name"] for item in payload.get("items", []))
 
+    def get_k8s_nodes_payload(self) -> list[dict]:
+        result = self.runner.kubectl(["get", "nodes", "-o", "json"])
+        payload = json.loads(result.stdout or "{}")
+        return payload.get("items", [])
+
     def list_nova_compute_hosts(self) -> list[str]:
         result = self.runner.openstack(
             ["compute", "service", "list", "--service", "nova-compute", "-f", "json"]
         )
         payload = json.loads(result.stdout or "[]")
         return sorted({item["Host"] for item in payload if item.get("Host")})
+
+    def list_compute_services(self) -> list[dict]:
+        result = self.runner.openstack(
+            ["compute", "service", "list", "--service", "nova-compute", "-f", "json"]
+        )
+        return json.loads(result.stdout or "[]")
 
     def cordon(self, target: TargetNode) -> CommandResult:
         return self.runner.kubectl(["cordon", target.k8s_node])
@@ -201,6 +212,31 @@ class ClusterOperations:
             time.sleep(self.config.poll_interval_seconds)
         return self.list_servers_for_host(target)[1:]
 
+    def build_target_summaries(self, targets: list[TargetNode]) -> list[TargetSummary]:
+        servers = self.list_servers()
+        amphorae = self.list_amphorae()
+        amphora_ids = {amphora.compute_id for amphora in amphorae if amphora.compute_id}
+        pattern = re.compile(self.config.amphora_name_pattern)
+        compute_services = self.list_compute_services()
+        k8s_nodes = self.get_k8s_nodes_payload()
+
+        summaries: list[TargetSummary] = []
+        for target in targets:
+            matched_servers = [server for server in servers if self._server_matches_target(server, target)]
+            amphora_servers = [
+                server for server in matched_servers if server.id in amphora_ids or pattern.match(server.name)
+            ]
+            summary = TargetSummary(
+                target=target,
+                total_instances=len(matched_servers),
+                amphora_instances=len(amphora_servers),
+                migratable_instances=len(matched_servers) - len(amphora_servers),
+                compute_service_status=self._compute_service_status(target, compute_services),
+                k8s_scheduling_status=self._k8s_scheduling_status(target, k8s_nodes),
+            )
+            summaries.append(summary)
+        return summaries
+
     def _server_matches_target(self, server: NovaServer, target: TargetNode) -> bool:
         candidates = self._host_candidates(target)
         host = (server.host or "").lower()
@@ -213,3 +249,22 @@ class ClusterOperations:
             target.k8s_node.lower(),
             _normalize_name(target.k8s_node),
         }
+
+    def _compute_service_status(self, target: TargetNode, compute_services: list[dict]) -> str:
+        candidates = self._host_candidates(target)
+        matches = [item for item in compute_services if (item.get("Host") or "").lower() in candidates]
+        if not matches:
+            return "missing"
+        service = matches[0]
+        status = (service.get("Status") or "unknown").lower()
+        state = (service.get("State") or "unknown").lower()
+        return f"{status}/{state}"
+
+    def _k8s_scheduling_status(self, target: TargetNode, k8s_nodes: list[dict]) -> str:
+        for node in k8s_nodes:
+            name = node.get("metadata", {}).get("name", "")
+            if name.lower() not in self._host_candidates(target):
+                continue
+            unschedulable = node.get("spec", {}).get("unschedulable", False)
+            return "cordoned" if unschedulable else "schedulable"
+        return "missing"

@@ -44,20 +44,7 @@ class MaintenanceWorkflow:
                 f"Live migrate {server.name} ({server.id})",
                 lambda server_id=server.id: self.ops.migrate_server(server_id),
             )
-        failover_lb_ids: list[str] = []
-        for amphora_server in amphora:
-            amphorae = [
-                item for item in self.ops.list_amphorae() if item.compute_id == amphora_server.id and item.loadbalancer_id
-            ]
-            for item in amphorae:
-                if item.loadbalancer_id in failover_lb_ids:
-                    continue
-                failover_lb_ids.append(item.loadbalancer_id)
-                self._run_step(
-                    f"failover:{item.loadbalancer_id}",
-                    f"Fail over load balancer {item.loadbalancer_id} for amphora {amphora_server.id}",
-                    lambda lb_id=item.loadbalancer_id: self.ops.failover_loadbalancer(lb_id),
-                )
+        self.failover(target, amphora=amphora)
         self.emit(StatusEvent(step="wait_for_empty", state=StepState.RUNNING, message="Waiting for host to empty"))
         remaining_migratable, remaining_amphora = self.ops.wait_for_host_empty(target, self._emit_poll)
         if remaining_migratable or remaining_amphora:
@@ -68,6 +55,37 @@ class MaintenanceWorkflow:
             )
         self.emit(StatusEvent(step="wait_for_empty", state=StepState.SUCCESS, message="Nova host is empty"))
         self._run_step("drain", f"Drain Kubernetes node {target.k8s_node}", lambda: self.ops.drain(target))
+
+    def failover(self, target: TargetNode, amphora=None) -> None:
+        if amphora is None:
+            _, _, amphora = self._classify(target)
+        amphorae = self.ops.list_amphorae()
+        amphorae_by_compute_id: dict[str, list[str]] = {}
+        for item in amphorae:
+            if not item.compute_id or not item.loadbalancer_id:
+                continue
+            amphorae_by_compute_id.setdefault(item.compute_id, []).append(item.loadbalancer_id)
+        failover_lb_ids: list[str] = []
+        unresolved_amphora: list[str] = []
+        for amphora_server in amphora:
+            loadbalancer_ids = amphorae_by_compute_id.get(amphora_server.id, [])
+            if not loadbalancer_ids:
+                unresolved_amphora.append(amphora_server.id)
+                continue
+            for loadbalancer_id in loadbalancer_ids:
+                if loadbalancer_id in failover_lb_ids:
+                    continue
+                failover_lb_ids.append(loadbalancer_id)
+                self._run_step(
+                    f"failover:{loadbalancer_id}",
+                    f"Fail over load balancer {loadbalancer_id} for amphora {amphora_server.id}",
+                    lambda lb_id=loadbalancer_id: self.ops.failover_loadbalancer(lb_id),
+                )
+        if unresolved_amphora:
+            raise DrainoError(
+                "Found amphora instances on the host, but could not map them to load balancers for failover: "
+                f"{unresolved_amphora}"
+            )
 
     def _classify(self, target: TargetNode):
         self.emit(StatusEvent(step="classify", state=StepState.RUNNING, message="Collecting Nova and Octavia state"))

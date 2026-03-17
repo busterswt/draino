@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class StepState(str, Enum):
@@ -22,11 +22,17 @@ class CommandResult(BaseModel):
 
 
 class NovaServer(BaseModel):
-    id: str
-    name: str
-    host: str | None = Field(default=None, alias="OS-EXT-SRV-ATTR:host")
-    status: str | None = None
-    project_id: str | None = None
+    id: str = Field(validation_alias=AliasChoices("id", "ID"))
+    name: str = Field(validation_alias=AliasChoices("name", "Name"))
+    host: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OS-EXT-SRV-ATTR:host", "Host"),
+    )
+    status: str | None = Field(default=None, validation_alias=AliasChoices("status", "Status"))
+    project_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("project_id", "Project ID"),
+    )
 
     model_config = {"populate_by_name": True, "extra": "allow"}
 
@@ -48,8 +54,18 @@ class TargetNode(BaseModel):
     notes: str | None = None
 
 
+class TargetSummary(BaseModel):
+    target: TargetNode
+    total_instances: int = 0
+    migratable_instances: int = 0
+    amphora_instances: int = 0
+    compute_service_status: str = "unknown"
+    k8s_scheduling_status: str = "unknown"
+
+
 class MaintenanceConfig(BaseModel):
     openstack_cloud: str | None = None
+    refresh_interval_seconds: int = 30
     kubectl_drain_extra_args: list[str] = Field(
         default_factory=lambda: [
             "--ignore-daemonsets",

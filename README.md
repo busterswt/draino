@@ -36,12 +36,29 @@ draino
 draino --config draino.yaml
 ```
 
-Press `Enter` to start the workflow for the selected target. Use the arrow keys to change the selected target.
+The TUI shows one row per host with:
+
+- total instances
+- migratable instances
+- amphora instances
+- Nova compute service state
+- Kubernetes scheduling state
+
+Controls:
+
+- Arrow keys to move between rows
+- `m` to run the maintenance workflow on the selected row
+- `f` to trigger amphora/load balancer failover for the selected row
+- `r` to refresh the host summary table
+- `q` to quit
+
+The table refreshes automatically every `refresh_interval_seconds`.
 
 ## Optional config
 
 ```yaml
 openstack_cloud: mycloud
+refresh_interval_seconds: 30
 kubectl_drain_timeout: 30m
 poll_interval_seconds: 10
 wait_timeout_seconds: 3600
