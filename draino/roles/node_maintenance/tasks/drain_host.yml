@@ -32,16 +32,37 @@
           - nova_compute_services.compute_services | length > 0
         fail_msg: "No nova-compute service found for host {{ target.nova_compute_host }}."
 
-    - name: Cordon and drain Kubernetes node
-      kubernetes.core.k8s_drain:
-        name: "{{ target.k8s_node }}"
-        state: drain
-        delete_emptydir_data: "{{ k8s_drain_delete_emptydir_data }}"
-        force: "{{ k8s_drain_force }}"
-        ignore_daemonsets: "{{ k8s_drain_ignore_daemonsets }}"
-        wait_sleep: "{{ k8s_wait_sleep }}"
-        wait_timeout: "{{ k8s_wait_timeout }}"
-      register: k8s_drain_result
+    - name: Cordon Kubernetes node
+      block:
+        - name: Show cordon command
+          ansible.builtin.debug:
+            msg: "DRY-RUN: kubectl cordon {{ target.k8s_node }}"
+          when: dry_run
+
+        - name: Cordon node
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - cordon
+              - "{{ target.k8s_node }}"
+          when: not dry_run
+      delegate_to: localhost
+
+    - name: Drain Kubernetes node
+      block:
+        - name: Show drain command
+          ansible.builtin.debug:
+            msg: >-
+              DRY-RUN: kubectl drain {{ target.k8s_node }}
+              {{ kubectl_drain_extra_args | join(' ') }}
+              --timeout={{ kubectl_drain_timeout }}
+          when: dry_run
+
+        - name: Drain node
+          ansible.builtin.command:
+            argv: "{{ ['kubectl', 'drain', target.k8s_node] + kubectl_drain_extra_args + ['--timeout=' ~ kubectl_drain_timeout] }}"
+          when: not dry_run
+      delegate_to: localhost
 
     - name: Disable nova-compute service
       block:
@@ -125,63 +146,34 @@
       delegate_to: localhost
       when: servers_on_target_host | length > 0
 
-    - name: Poll servers until none remain
-      vars:
-        remaining_servers: []
-      retries: "{{ nova_poll_retries }}"
-      delay: "{{ nova_poll_delay }}"
-      until: remaining_servers | length == 0 or dry_run
-      block:
-        - name: Refresh server list
-          openstack.cloud.server_info:
-            all_projects: true
-            cloud: "{{ openstack_cloud | default(omit) }}"
-          register: all_servers_refresh
-
-        - name: Compute remaining servers on host
-          ansible.builtin.set_fact:
-            remaining_servers: >-
-              {{
-                (all_servers_refresh.servers | default([]))
-                | selectattr('host', 'defined')
-                | selectattr('host', 'equalto', target.nova_compute_host)
-                | list
-              }}
-
-        - name: Debug remaining count
-          ansible.builtin.debug:
-            msg: "Remaining servers on {{ target.nova_compute_host }}: {{ remaining_servers | length }}"
-      rescue:
-        - name: Fail if polling loop errored
-          ansible.builtin.fail:
-            msg: "Timed out or error while waiting for servers to migrate from {{ target.nova_compute_host }}"
-      when: not dry_run
-
-    - name: Final Nova verification
+    - name: Wait until no servers remain on the compute host
       openstack.cloud.server_info:
         all_projects: true
         cloud: "{{ openstack_cloud | default(omit) }}"
-      register: final_servers
+      register: all_servers_refresh
+      retries: "{{ nova_poll_retries }}"
+      delay: "{{ nova_poll_delay }}"
+      until: >-
+        (
+          all_servers_refresh.servers | default([])
+          | selectattr('host', 'defined')
+          | selectattr('host', 'equalto', target.nova_compute_host)
+          | list
+          | length
+        ) == 0
       when: not dry_run
 
-    - name: Build remaining server list
-      ansible.builtin.set_fact:
-        remaining_servers_on_target: >-
+    - name: Debug remaining servers after wait
+      ansible.builtin.debug:
+        msg: >-
+          Remaining servers on {{ target.nova_compute_host }}:
           {{
-            (final_servers.servers | default([]))
+            all_servers_refresh.servers | default([])
             | selectattr('host', 'defined')
             | selectattr('host', 'equalto', target.nova_compute_host)
+            | map(attribute='id')
             | list
           }}
-      when: not dry_run
-
-    - name: Fail if Nova instances still remain
-      ansible.builtin.assert:
-        that:
-          - remaining_servers_on_target | length == 0
-        fail_msg: >-
-          Host {{ target.nova_compute_host }} still has Nova instances:
-          {{ remaining_servers_on_target | map(attribute='id') | list }}
       when: not dry_run
 
     - name: Verify Kubernetes node is unschedulable
@@ -242,15 +234,18 @@
       block:
         - name: Show uncordon
           ansible.builtin.debug:
-            msg: "DRY-RUN: kubernetes.core.k8s_drain name={{ target.k8s_node }} state=uncordon"
+            msg: "DRY-RUN: kubectl uncordon {{ target.k8s_node }}"
           when: dry_run
 
         - name: Attempt uncordon
-          kubernetes.core.k8s_drain:
-            name: "{{ target.k8s_node }}"
-            state: uncordon
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - uncordon
+              - "{{ target.k8s_node }}"
           when: not dry_run
           ignore_errors: true
+      delegate_to: localhost
 
     - name: Fail with context
       ansible.builtin.fail:

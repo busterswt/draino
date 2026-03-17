@@ -73,9 +73,20 @@
       delegate_to: localhost
 
     - name: Uncordon Kubernetes node
-      kubernetes.core.k8s_drain:
-        name: "{{ target.k8s_node }}"
-        state: uncordon
+      block:
+        - name: Show uncordon command
+          ansible.builtin.debug:
+            msg: "DRY-RUN: kubectl uncordon {{ target.k8s_node }}"
+          when: dry_run
+
+        - name: Uncordon node
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - uncordon
+              - "{{ target.k8s_node }}"
+          when: not dry_run
+      delegate_to: localhost
 
     - name: Verify node is schedulable again
       kubernetes.core.k8s_info:

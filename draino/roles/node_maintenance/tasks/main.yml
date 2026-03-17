@@ -11,6 +11,7 @@
   ansible.builtin.debug:
     msg:
       - "This role expects kubernetes.core and openstack.cloud collections."
+      - "kubectl is used for drain because k8s_drain options vary by collection version."
       - "Some operations use openstacksdk or CLI fallback."
   changed_when: false
 
