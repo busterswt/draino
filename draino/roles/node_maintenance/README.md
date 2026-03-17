@@ -5,6 +5,7 @@ Purpose: automate safe maintenance operations for compute nodes:
 - Drain and cordon a Kubernetes node
 - Disable Nova compute scheduling
 - Live-migrate Nova instances off the host via openstacksdk helper
+- Exclude Octavia amphora from migration by default
 - Optionally delete the Nova compute service record when empty
 
 It also supports restore:
@@ -26,7 +27,12 @@ It also supports restore:
 ## Defaults
 
 dry_run is true by default.
+exclude_amphora_from_migration is true by default.
 
 ## Compatibility note
 
 This version uses kubectl for cordon, drain, and uncordon because kubernetes.core.k8s_drain parameters vary significantly across collection versions.
+
+## OpenStack server host matching
+
+This version matches instances using OS-EXT-SRV-ATTR:host.

@@ -38,7 +38,6 @@
           ansible.builtin.debug:
             msg: "DRY-RUN: kubectl cordon {{ target.k8s_node }}"
           when: dry_run
-
         - name: Cordon node
           ansible.builtin.command:
             argv:
@@ -57,7 +56,6 @@
               {{ kubectl_drain_extra_args | join(' ') }}
               --timeout={{ kubectl_drain_timeout }}
           when: dry_run
-
         - name: Drain node
           ansible.builtin.command:
             argv: "{{ ['kubectl', 'drain', target.k8s_node] + kubectl_drain_extra_args + ['--timeout=' ~ kubectl_drain_timeout] }}"
@@ -70,7 +68,6 @@
           ansible.builtin.debug:
             msg: "DRY-RUN: openstack compute service set --disable --disable-reason '{{ nova_disable_reason }}' {{ target.nova_compute_host }} nova-compute"
           when: dry_run
-
         - name: Disable compute service
           ansible.builtin.command:
             argv:
@@ -99,16 +96,34 @@
         servers_on_target_host: >-
           {{
             (all_servers.servers | default([]))
-            | selectattr('host', 'defined')
-            | selectattr('host', 'equalto', target.nova_compute_host)
+            | selectattr('OS-EXT-SRV-ATTR:host', 'defined')
+            | selectattr('OS-EXT-SRV-ATTR:host', 'equalto', target.nova_compute_host)
             | list
           }}
 
-    - name: Log servers found
+    - name: Split amphora and migratable instances
+      ansible.builtin.set_fact:
+        amphora_servers_on_target_host: >-
+          {{
+            servers_on_target_host
+            | selectattr('name', 'match', '^amphora-.*')
+            | list
+          }}
+        migratable_servers_on_target_host: >-
+          {{
+            servers_on_target_host
+            | rejectattr('name', 'match', '^amphora-.*')
+            | list
+            if exclude_amphora_from_migration | bool
+            else servers_on_target_host
+          }}
+
+    - name: Log server classification
       ansible.builtin.debug:
         msg:
-          - "Found {{ servers_on_target_host | length }} servers on {{ target.nova_compute_host }}"
-          - "{{ servers_on_target_host | map(attribute='id') | list }}"
+          - "Found {{ servers_on_target_host | length }} total servers on {{ target.nova_compute_host }}"
+          - "Amphora excluded: {{ amphora_servers_on_target_host | map(attribute='id') | list if exclude_amphora_from_migration | bool else [] }}"
+          - "Migratable servers: {{ migratable_servers_on_target_host | map(attribute='id') | list }}"
 
     - name: Copy migrate helper to control host
       ansible.builtin.copy:
@@ -137,16 +152,16 @@
           {{ dry_arg }}
           {{ cloud_arg }}
       ansible.builtin.shell: "{{ migrate_cmd_tmp }}"
-      loop: "{{ servers_on_target_host }}"
+      loop: "{{ migratable_servers_on_target_host }}"
       loop_control:
         label: "{{ item.id }}"
       register: migrate_results
       failed_when: (migrate_results is failed) and (not dry_run)
       changed_when: (migrate_results is defined) and (migrate_results.rc == 0) and (not dry_run)
       delegate_to: localhost
-      when: servers_on_target_host | length > 0
+      when: migratable_servers_on_target_host | length > 0
 
-    - name: Wait until no servers remain on the compute host
+    - name: Wait until no non-amphora servers remain on the compute host
       openstack.cloud.server_info:
         all_projects: true
         cloud: "{{ openstack_cloud | default(omit) }}"
@@ -156,21 +171,60 @@
       until: >-
         (
           all_servers_refresh.servers | default([])
-          | selectattr('host', 'defined')
-          | selectattr('host', 'equalto', target.nova_compute_host)
+          | selectattr('OS-EXT-SRV-ATTR:host', 'defined')
+          | selectattr('OS-EXT-SRV-ATTR:host', 'equalto', target.nova_compute_host)
+          | rejectattr('name', 'match', '^amphora-.*')
           | list
           | length
         ) == 0
       when: not dry_run
 
-    - name: Debug remaining servers after wait
-      ansible.builtin.debug:
-        msg: >-
-          Remaining servers on {{ target.nova_compute_host }}:
+    - name: Build remaining instance lists
+      ansible.builtin.set_fact:
+        remaining_servers_on_target: >-
           {{
             all_servers_refresh.servers | default([])
-            | selectattr('host', 'defined')
-            | selectattr('host', 'equalto', target.nova_compute_host)
+            | selectattr('OS-EXT-SRV-ATTR:host', 'defined')
+            | selectattr('OS-EXT-SRV-ATTR:host', 'equalto', target.nova_compute_host)
+            | list
+          }}
+        remaining_non_amphora_servers_on_target: >-
+          {{
+            all_servers_refresh.servers | default([])
+            | selectattr('OS-EXT-SRV-ATTR:host', 'defined')
+            | selectattr('OS-EXT-SRV-ATTR:host', 'equalto', target.nova_compute_host)
+            | rejectattr('name', 'match', '^amphora-.*')
+            | list
+          }}
+      when: not dry_run
+
+    - name: Debug remaining non-amphora servers after wait
+      ansible.builtin.debug:
+        msg: >-
+          Remaining non-amphora servers on {{ target.nova_compute_host }}:
+          {{
+            remaining_non_amphora_servers_on_target
+            | map(attribute='id')
+            | list
+          }}
+      when: not dry_run
+
+    - name: Fail if non-amphora instances still remain
+      ansible.builtin.assert:
+        that:
+          - remaining_non_amphora_servers_on_target | length == 0
+        fail_msg: >-
+          Host {{ target.nova_compute_host }} still has non-amphora instances:
+          {{ remaining_non_amphora_servers_on_target | map(attribute='id') | list }}
+      when: not dry_run
+
+    - name: Show remaining amphora instances
+      ansible.builtin.debug:
+        msg: >-
+          Remaining amphora on {{ target.nova_compute_host }}:
+          {{
+            remaining_servers_on_target
+            | selectattr('name', 'match', '^amphora-.*')
             | map(attribute='id')
             | list
           }}
@@ -195,7 +249,6 @@
           ansible.builtin.debug:
             msg: "DRY-RUN: openstack compute service delete {{ nova_compute_services.compute_services[0].id }}"
           when: dry_run
-
         - name: Delete compute service entry
           ansible.builtin.command:
             argv:
@@ -215,7 +268,6 @@
           ansible.builtin.debug:
             msg: "DRY-RUN: openstack compute service set --enable {{ target.nova_compute_host }} nova-compute"
           when: dry_run
-
         - name: Re-enable nova compute
           ansible.builtin.command:
             argv:
@@ -236,7 +288,6 @@
           ansible.builtin.debug:
             msg: "DRY-RUN: kubectl uncordon {{ target.k8s_node }}"
           when: dry_run
-
         - name: Attempt uncordon
           ansible.builtin.command:
             argv:

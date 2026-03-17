@@ -4,8 +4,6 @@ target_hosts: []
 
 nova_disable_reason: "maintenance: drained by ansible"
 
-# k8s_drain module compatibility varies a lot by collection version.
-# Use kubectl for drain so we can pass the needed flags consistently.
 kubectl_drain_timeout: "30m"
 kubectl_drain_extra_args:
   - "--ignore-daemonsets"
@@ -22,6 +20,7 @@ openstack_cmd_timeout: 600
 openstack_cloud: null
 
 dry_run: true
+exclude_amphora_from_migration: true
 
 openstack_sdk_python: "python3"
 openstack_sdk_requirements:
