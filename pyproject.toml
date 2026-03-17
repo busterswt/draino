@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "draino"
+version = "0.1.0"
+description = "TUI workflow for draining Kubernetes and OpenStack compute nodes ahead of maintenance"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.6,<3",
+  "PyYAML>=6.0,<7",
+  "textual>=0.58,<1",
+]
+
+[project.scripts]
+draino = "draino.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
